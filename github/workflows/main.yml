@@ -2,19 +2,24 @@ name: Hello GitHub Actions
 
 on: 
     push:
-        branches: ["*"]
+        branches: ["**"]
           
 jobs: 
     build:
         # Maquina que ira rodar, utilizar linux para econimia de minutagem (1x)
         runs-on: ubuntu-latest
         steps: 
-            - uses: actions/checkout@v2
-            - uses: actions/setup-node@v1
+            - uses: actions/checkout@v4
+            
+            - uses: actions/setup-node@v4
               with:
-                  node-version: 16
+                  node-version: 20
+
+                  
             - run: npm ci #utiliza seu package.lock
+
             # Comandos no package.json
+
             - run: npm run test
             - run: npm run build
             - run: npm run deploy
