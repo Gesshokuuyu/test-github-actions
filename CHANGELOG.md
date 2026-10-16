@@ -5,6 +5,13 @@ Todas as mudancas notaveis neste projeto serao documentadas neste arquivo.
 O formato e baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.0.0/),
 e este projeto adere ao [Versionamento Semantico (SemVer 2.0.0)](https://semver.org/lang/pt-BR/).
 
+## [v1.1.2] - 2026-10-16
+
+### Correcoes (Bug Fixes)
+- **app:** ajusta mensagem de saida - 3 (`ecdf57a`)
+
+**Comparacao de alteracoes:** [`v1.1.1...v1.1.2`](https://github.com/Gesshokuuyu/test-github-actions/compare/v1.1.1...v1.1.2)
+
 ## [v1.1.1] - 2026-10-16
 
 ### Correcoes (Bug Fixes)
