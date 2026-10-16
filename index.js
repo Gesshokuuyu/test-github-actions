@@ -1,2 +1,2 @@
 console.log('Testando github actions')
-console.log('Testando github actions v2')
+console.log('Testando github actions v1')
