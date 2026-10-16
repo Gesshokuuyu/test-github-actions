@@ -1,0 +1,102 @@
+name: "01. CI - Qualidade, Testes e Commits Semanticos"
+
+# ==============================================================================
+# WORKFLOW PADRONIZADO DE INTEGRACAO CONTINUA (CI)
+# ==============================================================================
+# Objetivo:
+#   - Validar Pull Requests antes do merge em 'main', 'stable' ou 'develop'.
+#   - Verificar se as mensagens de commit seguem o padrao Conventional Commits.
+#   - Executar Lint, Testes e Build em ambiente Linux enxuto (economia de minutagem).
+# ==============================================================================
+
+on:
+  pull_request:
+    branches:
+      - main
+      - stable
+      - develop
+      - "release/**"
+      - "hotfix/**"
+  push:
+    branches:
+      - develop
+      - "feature/**"
+      - "fix/**"
+      - "hotfix/**"
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+
+# Cancela execucoes anteriores na mesma branch/PR se um novo push for enviado
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # JOB 1: Validacao de Mensagens de Commit (Conventional Commits)
+  # ----------------------------------------------------------------------------
+  validate-commits:
+    name: "Validar Commits Semanticos"
+    runs-on: ubuntu-latest
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    steps:
+      - name: "Checkout do Repositorio"
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: "Analisar Padrao Conventional Commits"
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            node scripts/validate-commits.js --base "origin/${{ github.base_ref }}" --head "HEAD"
+          else
+            node scripts/validate-commits.js
+          fi
+
+  # ----------------------------------------------------------------------------
+  # JOB 2: Qualidade de Codigo, Testes Automatizados e Build
+  # ----------------------------------------------------------------------------
+  test-and-build:
+    name: "Testes e Build (Node ${{ matrix.node-version }})"
+    runs-on: ubuntu-latest
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    strategy:
+      fail-fast: true
+      matrix:
+        node-version: [20]
+
+    steps:
+      - name: "Checkout do Codigo"
+        uses: actions/checkout@v4
+
+      - name: "Configurar Node.js ${{ matrix.node-version }}"
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: "npm"
+
+      - name: "Instalar Dependencias (npm ci)"
+        run: npm ci
+
+      - name: "Verificar Lint"
+        run: npm run lint --if-present
+
+      - name: "Executar Testes Automatizados"
+        run: npm run test
+
+      - name: "Executar Build da Aplicacao"
+        run: npm run build
+
+      - name: "Gerar Resumo da Validacao CI"
+        run: |
+          {
+            echo "### Pipeline de CI Concluido"
+            echo "- **Branch / Ref:** \`${{ github.ref_name }}\`"
+            echo "- **Commit:** \`${{ github.sha }}\`"
+            echo "- **Node.js:** \`v${{ matrix.node-version }}\`"
+            echo "- **Status:** Testes e Build aprovados."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,208 @@
+name: "02. Release - Versionamento Semantico (SemVer) e Changelog"
+
+# ==============================================================================
+# WORKFLOW PADRONIZADO DE RELEASE E VERSIONAMENTO SEMANTICO (SemVer)
+# ==============================================================================
+# Objetivo:
+#   - Calcular automaticamente a proxima versao SemVer (MAJOR.MINOR.PATCH)
+#     baseada em Conventional Commits (ou permitir selecao manual via UI).
+#   - Atualizar package.json e gerar/atualizar o CHANGELOG.md automaticamente.
+#   - Criar tags SemVer imutaveis (vX.Y.Z) e tags flutuantes de serie (vX, vX.Y).
+#   - Publicar a GitHub Release oficial com notas detalhadas.
+#   - Promover automaticamente para o canal 'stable' (quando nao for pre-release).
+# ==============================================================================
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: "Tipo de incremento SemVer (auto calcula pelos commits)"
+        required: true
+        default: "auto"
+        type: choice
+        options:
+          - auto
+          - patch
+          - minor
+          - major
+          - prerelease-rc
+          - prerelease-beta
+          - prerelease-alpha
+      custom_version:
+        description: "Forcar versao especifica (opcional, ex: 1.5.0 ou 2.0.0-rc.1)"
+        required: false
+        default: ""
+        type: string
+      promote_to_stable:
+        description: "Promover automaticamente para canal 'stable' e fazer deploy em producao?"
+        required: false
+        default: true
+        type: boolean
+      dry_run:
+        description: "Modo Simulacao (Dry-Run: calcula versao e changelog sem criar tags/commits)"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # JOB 1: Calculo SemVer, Atualizacao de Changelog, Tagging e GitHub Release
+  # ----------------------------------------------------------------------------
+  prepare-and-release:
+    name: "Gerar Versao SemVer e GitHub Release"
+    runs-on: ubuntu-latest
+    if: "!contains(github.event.head_commit.message, '[skip ci]') && !startsWith(github.event.head_commit.message, 'chore(release):')"
+    outputs:
+      should_release: ${{ steps.semver.outputs.should_release }}
+      version_tag: ${{ steps.semver.outputs.version_tag }}
+      is_prerelease: ${{ steps.semver.outputs.is_prerelease }}
+      should_deploy_stable: ${{ steps.decision.outputs.should_deploy_stable }}
+
+    steps:
+      - name: "Checkout Completo (Historico e Tags)"
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "Configurar Node.js 20"
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: "Instalar Dependencias"
+        run: npm ci
+
+      - name: "Validar Testes e Build Antes da Release"
+        run: |
+          npm run test
+          npm run build
+
+      - name: "Calcular Versao SemVer e Gerar Changelog"
+        id: semver
+        run: |
+          RELEASE_TYPE="${{ inputs.release_type || 'auto' }}"
+          CUSTOM_VER="${{ inputs.custom_version || '' }}"
+          DRY_RUN_FLAG=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            DRY_RUN_FLAG="--dry-run"
+          fi
+
+          node scripts/prepare-release.js \
+            --ci \
+            --type "$RELEASE_TYPE" \
+            --custom-version "$CUSTOM_VER" \
+            $DRY_RUN_FLAG
+
+      - name: "Commit de Versao, Tags SemVer e Publicacao da Release"
+        if: ${{ steps.semver.outputs.should_release == 'true' && inputs.dry_run != true }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION_TAG="${{ steps.semver.outputs.version_tag }}"
+          MAJOR_TAG="${{ steps.semver.outputs.major_tag }}"
+          MINOR_TAG="${{ steps.semver.outputs.minor_tag }}"
+          IS_PRERELEASE="${{ steps.semver.outputs.is_prerelease }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # 1. Commit dos arquivos de versao e CHANGELOG.md
+          git add package*.json CHANGELOG.md VERSION 2>/dev/null || git add package*.json CHANGELOG.md
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(release): ${VERSION_TAG} [skip ci]"
+            git push origin "HEAD:${{ github.ref_name }}"
+          fi
+
+          # 2. Cria a tag SemVer imutavel (ex: v1.2.0)
+          git tag -fa "$VERSION_TAG" -m "Release $VERSION_TAG"
+          git push origin "refs/tags/$VERSION_TAG" --force
+
+          # 3. Se for versao estavel (nao pre-release), atualiza tags flutuantes de serie (v1, v1.2)
+          if [ "$IS_PRERELEASE" = "false" ]; then
+            git tag -fa "$MAJOR_TAG" -m "Ultima versao da serie $MAJOR_TAG ($VERSION_TAG)"
+            git tag -fa "$MINOR_TAG" -m "Ultima versao da serie $MINOR_TAG ($VERSION_TAG)"
+            git push origin "refs/tags/$MAJOR_TAG" "refs/tags/$MINOR_TAG" --force
+          fi
+
+          # 4. Cria ou atualiza a GitHub Release oficial com as notas geradas
+          PRERELEASE_FLAG=""
+          if [ "$IS_PRERELEASE" = "true" ]; then
+            PRERELEASE_FLAG="--prerelease"
+          else
+            PRERELEASE_FLAG="--latest"
+          fi
+
+          if gh release view "$VERSION_TAG" >/dev/null 2>&1; then
+            gh release edit "$VERSION_TAG" \
+              --title "Release $VERSION_TAG" \
+              --notes-file RELEASE_NOTES.md \
+              $PRERELEASE_FLAG
+          else
+            gh release create "$VERSION_TAG" \
+              --title "Release $VERSION_TAG" \
+              --notes-file RELEASE_NOTES.md \
+              $PRERELEASE_FLAG
+          fi
+
+      - name: "Definir Promocao para Canal Stable"
+        id: decision
+        run: |
+          SHOULD_RELEASE="${{ steps.semver.outputs.should_release }}"
+          IS_PRERELEASE="${{ steps.semver.outputs.is_prerelease }}"
+          DRY_RUN="${{ inputs.dry_run }}"
+          PROMOTE_INPUT="${{ inputs.promote_to_stable }}"
+
+          if [ "$SHOULD_RELEASE" = "true" ] && [ "$IS_PRERELEASE" = "false" ] && [ "$DRY_RUN" != "true" ] && [ "$PROMOTE_INPUT" != "false" ]; then
+            echo "should_deploy_stable=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_deploy_stable=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: "Gerar Resumo da Release"
+        run: |
+          if [ "${{ steps.semver.outputs.should_release }}" = "true" ]; then
+            {
+              echo "## Resumo da Release SemVer"
+              echo "| Campo | Valor |"
+              echo "| :--- | :--- |"
+              echo "| **Nova Versao** | \`${{ steps.semver.outputs.version_tag }}\` |"
+              echo "| **Versao Anterior** | \`${{ steps.semver.outputs.previous_tag || '(Primeira Release)' }}\` |"
+              echo "| **Tipo de Incremento** | \`${{ steps.semver.outputs.bump_type }}\` |"
+              echo "| **Pre-Release** | \`${{ steps.semver.outputs.is_prerelease }}\` |"
+              echo "| **Modo Simulacao (Dry-Run)** | \`${{ inputs.dry_run || false }}\` |"
+              echo ""
+              echo "### Notas de Lancamento"
+              cat RELEASE_NOTES.md
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Nenhuma nova versao gerada (sem commits elegiveis para incremento SemVer)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  # ----------------------------------------------------------------------------
+  # JOB 2: Promocao Automatica para 'stable' e Deploy em Producao
+  # ----------------------------------------------------------------------------
+  deploy-stable:
+    name: "Promover para Canal Stable"
+    needs: prepare-and-release
+    if: ${{ needs.prepare-and-release.outputs.should_deploy_stable == 'true' }}
+    uses: ./.github/workflows/stable-deploy.yml
+    with:
+      version_tag: ${{ needs.prepare-and-release.outputs.version_tag }}
+      environment: "production"
+      update_stable_pointer: true

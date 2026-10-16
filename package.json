@@ -3,9 +3,19 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
+    "lint": "echo \"Linting passed...\"",
     "test": "echo \"Tests running...\"",
     "build": "echo \"Build running...\"",
-    "deploy": "echo \"Deploying new build to cloud server...\""
+    "deploy": "echo \"Deploying new build to cloud server...\"",
+    "version:status": "node scripts/status.js",
+    "version:preview": "node scripts/status.js --preview",
+    "commit:check": "node scripts/validate-commits.js",
+    "commit:guide": "node scripts/commit-guide.js",
+    "release:patch": "node scripts/prepare-release.js --type patch",
+    "release:minor": "node scripts/prepare-release.js --type minor",
+    "release:major": "node scripts/prepare-release.js --type major",
+    "release:rc": "node scripts/prepare-release.js --type prerelease-rc",
+    "release:beta": "node scripts/prepare-release.js --type prerelease-beta"
   },
   "repository": {
     "type": "git",

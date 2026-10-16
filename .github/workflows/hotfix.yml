@@ -1,0 +1,177 @@
+name: "05. Hotfix - Correcao Urgente a partir de Stable e Backport"
+
+# ==============================================================================
+# WORKFLOW PADRONIZADO DE HOTFIX EM PRODUCAO (CANAL STABLE)
+# ==============================================================================
+# Objetivo:
+#   - Quando a branch 'main' ja possui novas features em andamento, mas um bug
+#     critico surge em Producao ('stable'), este workflow permite:
+#       1. 'create-hotfix-branch': Criar automaticamente uma branch 'hotfix/*'
+#          baseada exatamente na versao atual em Producao ('stable').
+#       2. 'publish-hotfix': A partir da branch 'hotfix/*', gerar uma versao
+#          PATCH de emergencia (ex: v1.2.0 -> v1.2.1), atualizar 'stable', fazer
+#          deploy em producao e abrir Pull Request de backport para a 'main'.
+# ==============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Acao de Hotfix a executar"
+        required: true
+        default: "create-hotfix-branch"
+        type: choice
+        options:
+          - create-hotfix-branch
+          - publish-hotfix
+      hotfix_name:
+        description: "Para 'create-hotfix-branch': identificador curto da correcao (ex: fix-auth-timeout)"
+        required: false
+        default: "urgent-fix"
+        type: string
+      hotfix_branch:
+        description: "Para 'publish-hotfix': nome da branch hotfix (ex: hotfix/v1.0.0-urgent-fix)"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # OPCAO 1: Criar Branch de Hotfix a partir da Tag/Branch 'stable'
+  # ----------------------------------------------------------------------------
+  create-branch:
+    name: "Criar Branch de Hotfix a partir do Stable"
+    runs-on: ubuntu-latest
+    if: ${{ inputs.action == 'create-hotfix-branch' }}
+
+    steps:
+      - name: "Checkout Completo"
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: "Criar e Publicar Branch hotfix/*"
+        run: |
+          if git rev-parse refs/tags/stable >/dev/null 2>&1; then
+            BASE_REF="refs/tags/stable"
+            BASE_VERSION=$(git tag --points-at refs/tags/stable | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || echo "stable")
+          else
+            BASE_VERSION=$(git tag -l "v*.*.*" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+            if [ -z "$BASE_VERSION" ]; then
+              BASE_REF="HEAD"
+              BASE_VERSION="v1.0.0"
+            else
+              BASE_REF="$BASE_VERSION"
+            fi
+          fi
+
+          SLUG=$(echo "${{ inputs.hotfix_name }}" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g')
+          BRANCH_NAME="hotfix/${BASE_VERSION}-${SLUG}"
+
+          git checkout -b "$BRANCH_NAME" "$BASE_REF"
+          git push origin "$BRANCH_NAME"
+
+          {
+            echo "## Branch de Hotfix Criada"
+            echo "- **Branch criada:** \`$BRANCH_NAME\`"
+            echo "- **Baseada na versao estavel:** \`$BASE_VERSION\`"
+            echo ""
+            echo "### Procedimento para aplicar a correcao:"
+            echo "\`\`\`bash"
+            echo "git fetch origin"
+            echo "git checkout $BRANCH_NAME"
+            echo "git commit -am \"fix: corrige anomalia em producao\""
+            echo "git push origin $BRANCH_NAME"
+            echo "\`\`\`"
+            echo "Em seguida, execute novamente este workflow selecionando a acao **\`publish-hotfix\`**."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ----------------------------------------------------------------------------
+  # OPCAO 2: Publicar Patch de Hotfix, Atualizar Stable e Abrir PR de Backport
+  # ----------------------------------------------------------------------------
+  publish-hotfix:
+    name: "Publicar Release de Hotfix e Backport"
+    runs-on: ubuntu-latest
+    if: ${{ inputs.action == 'publish-hotfix' }}
+    outputs:
+      version_tag: ${{ steps.release.outputs.version_tag }}
+
+    steps:
+      - name: "Checkout da Branch de Hotfix"
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.hotfix_branch || github.ref_name }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "Configurar Node.js 20"
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: "Instalar Dependencias, Testar e Buildar Hotfix"
+        run: |
+          npm ci
+          npm run test
+          npm run build
+
+      - name: "Gerar Versao PATCH de Hotfix e Publicar GitHub Release"
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TARGET_BRANCH="${{ inputs.hotfix_branch || github.ref_name }}"
+          if [[ "$TARGET_BRANCH" != hotfix/* ]]; then
+            echo "[ERRO] A publicacao de hotfix deve ser executada a partir de uma branch 'hotfix/*' (atual: $TARGET_BRANCH)."
+            exit 1
+          fi
+
+          node scripts/prepare-release.js --ci --type patch
+
+          VERSION_TAG=$(grep '^version_tag=' "$GITHUB_OUTPUT" | cut -d= -f2)
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add package*.json CHANGELOG.md
+          git commit -m "chore(release): hotfix ${VERSION_TAG} [skip ci]"
+          git push origin "HEAD:${TARGET_BRANCH}"
+
+          git tag -fa "$VERSION_TAG" -m "Hotfix Release $VERSION_TAG"
+          git push origin "refs/tags/$VERSION_TAG" --force
+
+          gh release create "$VERSION_TAG" \
+            --title "Hotfix Release $VERSION_TAG" \
+            --notes-file RELEASE_NOTES.md \
+            --latest
+
+      - name: "Criar Pull Request de Backport para a branch 'main'"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TARGET_BRANCH="${{ inputs.hotfix_branch || github.ref_name }}"
+          VERSION_TAG="${{ steps.release.outputs.version_tag }}"
+
+          gh pr create \
+            --base main \
+            --head "$TARGET_BRANCH" \
+            --title "chore(backport): sincroniza hotfix ${VERSION_TAG} com a main" \
+            --body "### Backport Automatico de Hotfix (\`${VERSION_TAG}\`)
+          Este Pull Request sincroniza as correcoes aplicadas em Producao na branch \`${TARGET_BRANCH}\` de volta para a branch \`main\`." || echo "[INFO] PR de backport ja existente ou desnecessario."
+
+  # ----------------------------------------------------------------------------
+  # JOB 3: Deploy Imediato do Hotfix no Canal Stable
+  # ----------------------------------------------------------------------------
+  deploy-hotfix-stable:
+    name: "Deploy do Hotfix no Canal Stable"
+    needs: publish-hotfix
+    uses: ./.github/workflows/stable-deploy.yml
+    with:
+      version_tag: ${{ needs.publish-hotfix.outputs.version_tag }}
+      environment: "production"
+      update_stable_pointer: true

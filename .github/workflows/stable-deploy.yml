@@ -1,0 +1,163 @@
+name: "03. Stable e Deploy - Promocao de Canal Estavel e Ambientes"
+
+# ==============================================================================
+# WORKFLOW PADRONIZADO DE CANAL STABLE E DEPLOY DE AMBIENTES
+# ==============================================================================
+# Objetivo:
+#   - Gerenciar o ponteiro oficial de Producao (branch 'stable' e tag 'stable').
+#   - Realizar o deploy rastreavel de uma versao SemVer especifica (vX.Y.Z).
+#   - Pode ser chamado automaticamente apos uma Release (workflow_call) ou
+#     disparado manualmente (workflow_dispatch) para promover qualquer versao.
+# ==============================================================================
+
+on:
+  workflow_call:
+    inputs:
+      version_tag:
+        description: "Tag da versao SemVer a ser implantada (ex: v1.2.0)"
+        required: true
+        type: string
+      environment:
+        description: "Ambiente de destino (production ou staging)"
+        required: false
+        default: "production"
+        type: string
+      update_stable_pointer:
+        description: "Atualizar branch e tag 'stable' para esta versao?"
+        required: false
+        default: true
+        type: boolean
+
+  workflow_dispatch:
+    inputs:
+      version_tag:
+        description: "Tag da versao (ex: v1.0.0 ou 'latest' para a ultima versao estavel)"
+        required: true
+        default: "latest"
+        type: string
+      environment:
+        description: "Ambiente alvo do deploy"
+        required: true
+        default: "production"
+        type: choice
+        options:
+          - production
+          - staging
+      update_stable_pointer:
+        description: "Atualizar a branch e tag 'stable' para apontar para esta versao?"
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: deploy-${{ inputs.environment || 'production' }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  promote-and-deploy:
+    name: "Deploy (${{ inputs.environment || 'production' }}) e Canal Stable"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: "Checkout Completo (Tags e Historico)"
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: "Resolver e Validar Versao Alvo"
+        id: resolve
+        run: |
+          REQUESTED_TAG="${{ inputs.version_tag }}"
+
+          if [ "$REQUESTED_TAG" = "latest" ] || [ -z "$REQUESTED_TAG" ]; then
+            RESOLVED_TAG=$(git tag -l "v*.*.*" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+            if [ -z "$RESOLVED_TAG" ]; then
+              echo "[ERRO] Nenhuma tag SemVer estavel (vX.Y.Z) encontrada no repositorio."
+              exit 1
+            fi
+          else
+            if [[ "$REQUESTED_TAG" != v* ]]; then
+              RESOLVED_TAG="v$REQUESTED_TAG"
+            else
+              RESOLVED_TAG="$REQUESTED_TAG"
+            fi
+
+            if ! git rev-parse "$RESOLVED_TAG" >/dev/null 2>&1; then
+              echo "[ERRO] A tag '$RESOLVED_TAG' nao existe no repositorio."
+              exit 1
+            fi
+          fi
+
+          COMMIT_SHA=$(git rev-list -n 1 "$RESOLVED_TAG")
+          SHORT_SHA=$(git rev-parse --short "$COMMIT_SHA")
+
+          echo "resolved_tag=$RESOLVED_TAG" >> "$GITHUB_OUTPUT"
+          echo "commit_sha=$COMMIT_SHA" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+          echo "[OK] Versao selecionada para deploy: $RESOLVED_TAG ($SHORT_SHA)"
+
+      - name: "Checkout Exato da Versao (${{ steps.resolve.outputs.resolved_tag }})"
+        run: |
+          git checkout "${{ steps.resolve.outputs.resolved_tag }}"
+
+      - name: "Configurar Node.js 20"
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: "Instalar Dependencias"
+        run: npm ci
+
+      - name: "Validacao Pre-Deploy (Testes e Build)"
+        run: |
+          npm run test
+          npm run build
+
+      - name: "Executar Deploy no Ambiente: ${{ inputs.environment || 'production' }}"
+        env:
+          DEPLOY_ENV: ${{ inputs.environment || 'production' }}
+          APP_VERSION: ${{ steps.resolve.outputs.resolved_tag }}
+          GIT_COMMIT: ${{ steps.resolve.outputs.commit_sha }}
+        run: |
+          echo "--------------------------------------------------------------"
+          echo " INICIANDO DEPLOY PADRONIZADO"
+          echo " Ambiente : $DEPLOY_ENV"
+          echo " Versao   : $APP_VERSION"
+          echo " Commit   : $GIT_COMMIT"
+          echo "--------------------------------------------------------------"
+          npm run deploy
+
+      - name: "Atualizar Canal 'stable' (Branch e Tag Movel)"
+        if: ${{ (inputs.environment == 'production' || inputs.environment == '') && inputs.update_stable_pointer != false }}
+        run: |
+          TARGET_TAG="${{ steps.resolve.outputs.resolved_tag }}"
+          TARGET_SHA="${{ steps.resolve.outputs.commit_sha }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # 1. Atualiza a branch 'stable' para refletir exatamente o codigo em producao
+          git push origin "$TARGET_SHA:refs/heads/stable" --force
+
+          # 2. Atualiza a tag movel 'stable'
+          git tag -fa stable "$TARGET_SHA" -m "Canal Stable apontando para $TARGET_TAG"
+          git push origin refs/tags/stable --force
+
+          echo "[OK] Canal 'stable' (branch e tag) atualizado para $TARGET_TAG ($TARGET_SHA)"
+
+      - name: "Gerar Relatorio de Deploy e Canal Stable"
+        run: |
+          {
+            echo "## Relatorio de Deploy e Canal Stable"
+            echo "| Parametro | Valor |"
+            echo "| :--- | :--- |"
+            echo "| **Versao Implantada** | \`${{ steps.resolve.outputs.resolved_tag }}\` |"
+            echo "| **Commit SHA** | \`${{ steps.resolve.outputs.short_sha }}\` |"
+            echo "| **Ambiente** | \`${{ inputs.environment || 'production' }}\` |"
+            echo "| **Ponteiro \`stable\` atualizado** | \`${{ (inputs.environment == 'production' || inputs.environment == '') && inputs.update_stable_pointer != false }}\` |"
+            echo "| **Executado por** | \`@${{ github.actor }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

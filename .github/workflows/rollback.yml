@@ -1,0 +1,203 @@
+name: "04. Rollback - Reversao de Emergencia e Restauracao Stable"
+
+# ==============================================================================
+# WORKFLOW PADRONIZADO DE ROLLBACK E RESTAURACAO DE VERSAO
+# ==============================================================================
+# Objetivo:
+#   - Permitir reverter rapidamente o ambiente de Producao ('stable') para a
+#     versao estavel anterior ('previous') ou qualquer tag especifica (ex: v1.0.0).
+#   - Suporta duas estrategias:
+#       1. 'fast-redeploy': Reaponta a branch/tag 'stable' e refaz deploy imediato
+#          da tag anterior sem alterar o historico da branch 'main'.
+#       2. 'forward-revert-release': Restaura o codigo da versao antiga na 'main'
+#          e publica uma nova versao PATCH (ex: v1.2.1 -> v1.2.2) de reversao.
+#   - Marca opcionalmente a GitHub Release problematica como [ROLLED BACK].
+# ==============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_version:
+        description: "Versao de destino (use 'previous' para a anterior automatica ou informe ex: v1.0.0)"
+        required: true
+        default: "previous"
+        type: string
+      strategy:
+        description: "Estrategia de Rollback"
+        required: true
+        default: "fast-redeploy"
+        type: choice
+        options:
+          - fast-redeploy
+          - forward-revert-release
+      reason:
+        description: "Motivo do Rollback (registrado para auditoria)"
+        required: true
+        default: "Reversao preventiva apos deteccao de anomalia em producao"
+        type: string
+      deprecate_broken_release:
+        description: "Marcar a Release problematica no GitHub como [ROLLED BACK] / Pre-release?"
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: rollback-production
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # JOB 1: Resolucao da Versao Alvo e Execucao da Estrategia de Rollback
+  # ----------------------------------------------------------------------------
+  execute-rollback:
+    name: "Executar Rollback (${{ inputs.strategy }})"
+    runs-on: ubuntu-latest
+    outputs:
+      deploy_tag: ${{ steps.process.outputs.deploy_tag }}
+      broken_version: ${{ steps.resolve.outputs.current_version }}
+      target_tag: ${{ steps.resolve.outputs.target_tag }}
+
+    steps:
+      - name: "Checkout Completo (Historico e Tags)"
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: "Configurar Node.js 20"
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: "Resolver Versao Atual e Versao Alvo do Rollback"
+        id: resolve
+        run: |
+          node scripts/resolve-rollback.js --target "${{ inputs.target_version }}"
+
+      - name: "Processar Estrategia: ${{ inputs.strategy }}"
+        id: process
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ROLLBACK_REASON: ${{ inputs.reason }}
+        run: |
+          STRATEGY="${{ inputs.strategy }}"
+          CURRENT_VER="${{ steps.resolve.outputs.current_version }}"
+          TARGET_TAG="${{ steps.resolve.outputs.target_tag }}"
+          FORWARD_TAG="${{ steps.resolve.outputs.forward_patch_tag }}"
+          FORWARD_RAW="${{ steps.resolve.outputs.forward_patch_raw }}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if [ "$STRATEGY" = "fast-redeploy" ]; then
+            echo "[INFO] Estrategia Fast-Redeploy selecionada: retornando ponteiro stable para $TARGET_TAG"
+            echo "deploy_tag=$TARGET_TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "[INFO] Estrategia Forward-Revert-Release: criando nova versao $FORWARD_TAG com o codigo de $TARGET_TAG"
+            git checkout main
+
+            cp CHANGELOG.md /tmp/CHANGELOG.backup.md 2>/dev/null || true
+
+            git checkout "$TARGET_TAG" -- .
+
+            if [ -f /tmp/CHANGELOG.backup.md ]; then
+              cp /tmp/CHANGELOG.backup.md CHANGELOG.md
+            fi
+
+            npm version "$FORWARD_RAW" --no-git-tag-version --allow-same-version
+
+            DATE_STR=$(date -u +"%Y-%m-%d")
+            cat <<EOF > RELEASE_NOTES.md
+          ## [$FORWARD_TAG] - $DATE_STR (Rollback Release)
+
+          ### Reversao de Versao (Rollback)
+          - Codigo restaurado integralmente para o estado estavel da versao **\`$TARGET_TAG\`**.
+          - **Versao revertida:** \`${CURRENT_VER:-N/A}\`
+          - **Motivo registrado:** $ROLLBACK_REASON
+          - **Executado por:** @${{ github.actor }}
+          EOF
+
+            node -e '
+              const fs = require("fs");
+              const { prependChangelog } = require("./scripts/lib/changelog");
+              const notes = fs.readFileSync("RELEASE_NOTES.md", "utf8");
+              prependChangelog(notes);
+            '
+
+            git add -A
+            git commit -m "revert(release): rollback para $TARGET_TAG via $FORWARD_TAG [skip ci]"
+            git push origin main
+
+            git tag -fa "$FORWARD_TAG" -m "Rollback Release $FORWARD_TAG (restaurado de $TARGET_TAG)"
+            git push origin "refs/tags/$FORWARD_TAG" --force
+
+            gh release create "$FORWARD_TAG" \
+              --title "Release $FORWARD_TAG (Rollback para $TARGET_TAG)" \
+              --notes-file RELEASE_NOTES.md \
+              --latest
+
+            echo "deploy_tag=$FORWARD_TAG" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: "Marcar GitHub Release Problematica como [ROLLED BACK]"
+        if: ${{ inputs.deprecate_broken_release != false && steps.resolve.outputs.current_version != '' && steps.resolve.outputs.current_version != steps.resolve.outputs.target_tag }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ROLLBACK_REASON: ${{ inputs.reason }}
+        run: |
+          BROKEN_TAG="${{ steps.resolve.outputs.current_version }}"
+          RESTORED_TAG="${{ steps.process.outputs.deploy_tag }}"
+          DATE_UTC=$(date -u +"%Y-%m-%d %H:%M UTC")
+
+          if gh release view "$BROKEN_TAG" >/dev/null 2>&1; then
+            EXISTING_BODY=$(gh release view "$BROKEN_TAG" --json body --jq '.body')
+            WARNING_BANNER="> [!CAUTION]
+          > ### VERSAO REVERTIDA (ROLLED BACK) EM $DATE_UTC
+          > Esta versao sofreu rollback para **\`$RESTORED_TAG\`** por \`@${{ github.actor }}\`.
+          > **Motivo:** $ROLLBACK_REASON
+          ---
+          "
+            printf "%s\n%s\n" "$WARNING_BANNER" "$EXISTING_BODY" > /tmp/updated_release_notes.md
+
+            gh release edit "$BROKEN_TAG" \
+              --title "[ROLLED BACK] Release $BROKEN_TAG" \
+              --notes-file /tmp/updated_release_notes.md \
+              --prerelease
+
+            if gh release view "$RESTORED_TAG" >/dev/null 2>&1; then
+              gh release edit "$RESTORED_TAG" --prerelease=false --latest
+            fi
+            echo "[OK] Release $BROKEN_TAG marcada como [ROLLED BACK] e $RESTORED_TAG definida como Latest."
+          else
+            echo "[INFO] A tag $BROKEN_TAG nao possui uma GitHub Release associada para edicao."
+          fi
+
+      - name: "Gerar Relatorio de Auditoria do Rollback"
+        run: |
+          {
+            echo "## Relatorio de Auditoria de Rollback"
+            echo "| Item | Detalhe |"
+            echo "| :--- | :--- |"
+            echo "| **Estrategia Utilizada** | \`${{ inputs.strategy }}\` |"
+            echo "| **Versao Anterior (Com Falha)** | \`${{ steps.resolve.outputs.current_version || 'N/A' }}\` |"
+            echo "| **Versao Base Restaurada** | \`${{ steps.resolve.outputs.target_tag }}\` |"
+            echo "| **Tag Enviada para Producao/Stable** | \`${{ steps.process.outputs.deploy_tag }}\` |"
+            echo "| **Motivo do Rollback** | ${{ inputs.reason }} |"
+            echo "| **Autorizado por** | \`@${{ github.actor }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ----------------------------------------------------------------------------
+  # JOB 2: Redeploy Imediato e Atualizacao da Branch/Tag 'stable'
+  # ----------------------------------------------------------------------------
+  redeploy-stable:
+    name: "Redeploy da Versao Restaurada no Canal Stable"
+    needs: execute-rollback
+    uses: ./.github/workflows/stable-deploy.yml
+    with:
+      version_tag: ${{ needs.execute-rollback.outputs.deploy_tag }}
+      environment: "production"
+      update_stable_pointer: true
