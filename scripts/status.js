@@ -32,15 +32,14 @@ const nextVersion = !baseTag
 console.log('--------------------------------------------------------------');
 console.log(' DIAGNOSTICO DE VERSIONAMENTO SEMANTICO (SemVer)');
 console.log('--------------------------------------------------------------');
-console.log(` Versao no package.json : v${info.packageVersion}`);
-console.log(` Ultima Tag registrada  : ${info.latestTag || '(Nenhuma tag registrada)'}`);
-console.log(` Ultima Tag Stable      : ${info.latestStableTag || '(Nenhuma release estavel)'}`);
-console.log(` Tag Stable Anterior    : ${info.previousStableTag || '(Indisponivel para rollback automatico)'}`);
-console.log(` Ponteiro 'stable'      : ${info.stablePointer || '(Nao definido)'}`);
+console.log(` Versao no package.json (branch atual) : v${info.packageVersion}`);
+console.log(` Maior Tag registrada no historico     : ${info.latestTag || '(Nenhuma tag registrada)'}`);
+console.log(` Versao Ativa no Canal 'stable'        : ${info.latestStableTag || '(Nenhuma release estavel)'}${info.stablePointer ? ` (commit ${info.stablePointer})` : ''}`);
+console.log(` Tag Stable Anterior (alvo rollback)   : ${info.previousStableTag || '(Indisponivel para rollback automatico)'}`);
 console.log('--------------------------------------------------------------');
-console.log(` Commits desde ${baseTag || 'o inicio'} : ${analysis.commits.length}`);
-console.log(` Sugestao de Bump SemVer: ${effectiveBump.toUpperCase()}`);
-console.log(` Proxima Versao prevista: ${nextVersion.tag}`);
+console.log(` Commits desde ${baseTag || 'o inicio'}                : ${analysis.commits.length}`);
+console.log(` Sugestao de Bump SemVer               : ${effectiveBump.toUpperCase()}`);
+console.log(` Proxima Versao prevista               : ${nextVersion.tag}`);
 console.log('--------------------------------------------------------------');
 
 if (showPreview) {

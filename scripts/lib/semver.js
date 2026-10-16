@@ -75,6 +75,31 @@ function getAllSemVerTags({ includePrerelease = true } = {}) {
 }
 
 /**
+ * Identifica qual tag SemVer (vX.Y.Z) corresponde exatamente ao ponteiro 'stable' atual.
+ */
+function getActiveStableTag() {
+  const stableCommit =
+    git('rev-list -n 1 refs/tags/stable', '') ||
+    git('rev-list -n 1 origin/stable', '');
+
+  if (!stableCommit) return null;
+
+  const tagsAtStable = git(`tag --points-at ${stableCommit}`);
+  if (!tagsAtStable) return null;
+
+  const matched = tagsAtStable
+    .split(/\r?\n/)
+    .map((t) => t.trim())
+    .filter((t) => {
+      const parsed = parseSemVer(t);
+      return parsed && !parsed.isPrerelease;
+    })
+    .sort(compareSemVerDesc);
+
+  return matched[0] || null;
+}
+
+/**
  * Coleta as informacoes de versao atual do projeto (package.json, VERSION e tags Git).
  */
 function getCurrentVersionInfo() {
@@ -94,8 +119,20 @@ function getCurrentVersionInfo() {
   }
 
   const latestTag = allTags[0] || null;
-  const latestStableTag = stableTags[0] || null;
-  const previousStableTag = stableTags[1] || null;
+  const highestStableTag = stableTags[0] || null;
+  const activeStableTag = getActiveStableTag() || highestStableTag;
+
+  // A versao anterior para rollback e a tag estavel imediatamente anterior a versao ativa em stable
+  let previousStableTag = null;
+  if (activeStableTag) {
+    const activeIdx = stableTags.indexOf(activeStableTag);
+    if (activeIdx !== -1 && activeIdx + 1 < stableTags.length) {
+      previousStableTag = stableTags[activeIdx + 1];
+    } else if (stableTags.length > 1) {
+      previousStableTag = stableTags[1];
+    }
+  }
+
   const stablePointer =
     git('rev-parse --short refs/tags/stable', '') ||
     git('rev-parse --short origin/stable', '');
@@ -103,7 +140,8 @@ function getCurrentVersionInfo() {
   return {
     packageVersion: pkgVersion,
     latestTag,
-    latestStableTag,
+    latestStableTag: activeStableTag,
+    highestStableTag,
     previousStableTag,
     stablePointer,
     allTags,
@@ -157,6 +195,7 @@ module.exports = {
   parseSemVer,
   compareSemVerDesc,
   getAllSemVerTags,
+  getActiveStableTag,
   getCurrentVersionInfo,
   incrementVersion,
 };

@@ -4,14 +4,19 @@ name: "04. Rollback - Reversao de Emergencia e Restauracao Stable"
 # WORKFLOW PADRONIZADO DE ROLLBACK E RESTAURACAO DE VERSAO
 # ==============================================================================
 # Objetivo:
-#   - Permitir reverter rapidamente o ambiente de Producao ('stable') para a
-#     versao estavel anterior ('previous') ou qualquer tag especifica (ex: v1.0.0).
-#   - Suporta duas estrategias:
-#       1. 'fast-redeploy': Reaponta a branch/tag 'stable' e refaz deploy imediato
-#          da tag anterior sem alterar o historico da branch 'main'.
-#       2. 'forward-revert-release': Restaura o codigo da versao antiga na 'main'
-#          e publica uma nova versao PATCH (ex: v1.2.1 -> v1.2.2) de reversao.
-#   - Marca opcionalmente a GitHub Release problematica como [ROLLED BACK].
+#   - Permitir reverter rapidamente o ambiente de Producao ('stable') e/ou a
+#     branch 'main' para a versao estavel anterior ('previous') ou qualquer tag
+#     especifica (ex: v1.0.0).
+#   - Suporta tres estrategias:
+#       1. 'revert-main-and-stable' (Padrao): Restaura o codigo e o package.json
+#          na branch 'main' de volta para a versao alvo (ex: v1.0.0), move a
+#          branch/tag 'stable' para a versao alvo e refaz o deploy.
+#       2. 'only-stable-pointer' (Fast-Redeploy): Move apenas a branch/tag
+#          'stable' para a versao anterior sem tocar na branch 'main'.
+#       3. 'forward-revert-release': Restaura o codigo da versao antiga na 'main'
+#          e publica uma nova versao PATCH (ex: v1.1.0 -> v1.1.1) de reversao.
+#   - Marca opcionalmente a GitHub Release problematica como [ROLLED BACK] ou a
+#     remove caso 'delete_broken_tag' seja selecionado.
 # ==============================================================================
 
 on:
@@ -25,18 +30,24 @@ on:
       strategy:
         description: "Estrategia de Rollback"
         required: true
-        default: "fast-redeploy"
+        default: "revert-main-and-stable"
         type: choice
         options:
-          - fast-redeploy
+          - revert-main-and-stable
+          - only-stable-pointer
           - forward-revert-release
       reason:
         description: "Motivo do Rollback (registrado para auditoria)"
         required: true
         default: "Reversao preventiva apos deteccao de anomalia em producao"
         type: string
+      delete_broken_tag:
+        description: "Excluir a tag e Release problematica (ex: apagar v1.1.0 para recomeçar da v1.0.0)?"
+        required: false
+        default: false
+        type: boolean
       deprecate_broken_release:
-        description: "Marcar a Release problematica no GitHub como [ROLLED BACK] / Pre-release?"
+        description: "Se nao excluir a tag, marcar a Release problematica como [ROLLED BACK] / Pre-release?"
         required: false
         default: true
         type: boolean
@@ -87,17 +98,41 @@ jobs:
           STRATEGY="${{ inputs.strategy }}"
           CURRENT_VER="${{ steps.resolve.outputs.current_version }}"
           TARGET_TAG="${{ steps.resolve.outputs.target_tag }}"
+          TARGET_RAW="${{ steps.resolve.outputs.target_raw }}"
           FORWARD_TAG="${{ steps.resolve.outputs.forward_patch_tag }}"
           FORWARD_RAW="${{ steps.resolve.outputs.forward_patch_raw }}"
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          if [ "$STRATEGY" = "fast-redeploy" ]; then
-            echo "[INFO] Estrategia Fast-Redeploy selecionada: retornando ponteiro stable para $TARGET_TAG"
+          if [ "$STRATEGY" = "only-stable-pointer" ]; then
+            echo "[INFO] Estrategia only-stable-pointer: retornando apenas o ponteiro stable para $TARGET_TAG"
             echo "deploy_tag=$TARGET_TAG" >> "$GITHUB_OUTPUT"
+
+          elif [ "$STRATEGY" = "revert-main-and-stable" ]; then
+            echo "[INFO] Estrategia revert-main-and-stable: restaurando branch main e package.json para $TARGET_TAG"
+            git checkout main
+
+            # Restaura todos os arquivos da branch main para o estado exato da versao alvo (incluindo package.json = 1.0.0)
+            git checkout "$TARGET_TAG" -- .
+
+            if ! git diff --cached --quiet || ! git diff --quiet; then
+              git add -A
+              git commit -m "revert(release): restaura main para estado da versao $TARGET_TAG [skip ci]"
+              git push origin main
+            fi
+
+            # Atualiza tags flutuantes de serie (v1, v1.0) para voltarem a apontar para a versao restaurada
+            MAJOR_NUM=$(echo "$TARGET_RAW" | cut -d. -f1)
+            MINOR_NUM=$(echo "$TARGET_RAW" | cut -d. -f2)
+            git tag -fa "v${MAJOR_NUM}" "$TARGET_TAG" -m "Rollback serie v${MAJOR_NUM} para $TARGET_TAG"
+            git tag -fa "v${MAJOR_NUM}.${MINOR_NUM}" "$TARGET_TAG" -m "Rollback serie v${MAJOR_NUM}.${MINOR_NUM} para $TARGET_TAG"
+            git push origin "refs/tags/v${MAJOR_NUM}" "refs/tags/v${MAJOR_NUM}.${MINOR_NUM}" --force
+
+            echo "deploy_tag=$TARGET_TAG" >> "$GITHUB_OUTPUT"
+
           else
-            echo "[INFO] Estrategia Forward-Revert-Release: criando nova versao $FORWARD_TAG com o codigo de $TARGET_TAG"
+            echo "[INFO] Estrategia forward-revert-release: criando nova versao $FORWARD_TAG com o codigo de $TARGET_TAG"
             git checkout main
 
             cp CHANGELOG.md /tmp/CHANGELOG.backup.md 2>/dev/null || true
@@ -143,37 +178,49 @@ jobs:
             echo "deploy_tag=$FORWARD_TAG" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: "Marcar GitHub Release Problematica como [ROLLED BACK]"
-        if: ${{ inputs.deprecate_broken_release != false && steps.resolve.outputs.current_version != '' && steps.resolve.outputs.current_version != steps.resolve.outputs.target_tag }}
+      - name: "Tratar Release e Tag Problematica (${{ steps.resolve.outputs.current_version }})"
+        if: ${{ steps.resolve.outputs.current_version != '' && steps.resolve.outputs.current_version != steps.resolve.outputs.target_tag }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ROLLBACK_REASON: ${{ inputs.reason }}
         run: |
           BROKEN_TAG="${{ steps.resolve.outputs.current_version }}"
           RESTORED_TAG="${{ steps.process.outputs.deploy_tag }}"
+          DELETE_BROKEN="${{ inputs.delete_broken_tag }}"
+          DEPRECATE_BROKEN="${{ inputs.deprecate_broken_release }}"
           DATE_UTC=$(date -u +"%Y-%m-%d %H:%M UTC")
 
-          if gh release view "$BROKEN_TAG" >/dev/null 2>&1; then
-            EXISTING_BODY=$(gh release view "$BROKEN_TAG" --json body --jq '.body')
-            WARNING_BANNER="> [!CAUTION]
+          if [ "$DELETE_BROKEN" = "true" ]; then
+            echo "[INFO] Excluindo GitHub Release e Tag problematica: $BROKEN_TAG"
+            gh release delete "$BROKEN_TAG" --yes 2>/dev/null || true
+            git push origin ":refs/tags/$BROKEN_TAG" 2>/dev/null || true
+
+            if gh release view "$RESTORED_TAG" >/dev/null 2>&1; then
+              gh release edit "$RESTORED_TAG" --prerelease=false --latest
+            fi
+            echo "[OK] Tag e Release $BROKEN_TAG removidas. $RESTORED_TAG definida como Latest."
+
+          elif [ "$DEPRECATE_BROKEN" != "false" ]; then
+            if gh release view "$BROKEN_TAG" >/dev/null 2>&1; then
+              EXISTING_BODY=$(gh release view "$BROKEN_TAG" --json body --jq '.body')
+              WARNING_BANNER="> [!CAUTION]
           > ### VERSAO REVERTIDA (ROLLED BACK) EM $DATE_UTC
           > Esta versao sofreu rollback para **\`$RESTORED_TAG\`** por \`@${{ github.actor }}\`.
           > **Motivo:** $ROLLBACK_REASON
           ---
           "
-            printf "%s\n%s\n" "$WARNING_BANNER" "$EXISTING_BODY" > /tmp/updated_release_notes.md
+              printf "%s\n%s\n" "$WARNING_BANNER" "$EXISTING_BODY" > /tmp/updated_release_notes.md
 
-            gh release edit "$BROKEN_TAG" \
-              --title "[ROLLED BACK] Release $BROKEN_TAG" \
-              --notes-file /tmp/updated_release_notes.md \
-              --prerelease
+              gh release edit "$BROKEN_TAG" \
+                --title "[ROLLED BACK] Release $BROKEN_TAG" \
+                --notes-file /tmp/updated_release_notes.md \
+                --prerelease
 
-            if gh release view "$RESTORED_TAG" >/dev/null 2>&1; then
-              gh release edit "$RESTORED_TAG" --prerelease=false --latest
+              if gh release view "$RESTORED_TAG" >/dev/null 2>&1; then
+                gh release edit "$RESTORED_TAG" --prerelease=false --latest
+              fi
+              echo "[OK] Release $BROKEN_TAG marcada como [ROLLED BACK] e $RESTORED_TAG definida como Latest."
             fi
-            echo "[OK] Release $BROKEN_TAG marcada como [ROLLED BACK] e $RESTORED_TAG definida como Latest."
-          else
-            echo "[INFO] A tag $BROKEN_TAG nao possui uma GitHub Release associada para edicao."
           fi
 
       - name: "Gerar Relatorio de Auditoria do Rollback"
@@ -186,6 +233,7 @@ jobs:
             echo "| **Versao Anterior (Com Falha)** | \`${{ steps.resolve.outputs.current_version || 'N/A' }}\` |"
             echo "| **Versao Base Restaurada** | \`${{ steps.resolve.outputs.target_tag }}\` |"
             echo "| **Tag Enviada para Producao/Stable** | \`${{ steps.process.outputs.deploy_tag }}\` |"
+            echo "| **Tag Problematica Excluida?** | \`${{ inputs.delete_broken_tag || false }}\` |"
             echo "| **Motivo do Rollback** | ${{ inputs.reason }} |"
             echo "| **Autorizado por** | \`@${{ github.actor }}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
