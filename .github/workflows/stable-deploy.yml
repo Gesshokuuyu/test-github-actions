@@ -60,6 +60,7 @@ jobs:
   promote-and-deploy:
     name: "Deploy (${{ inputs.environment || 'production' }}) e Canal Stable"
     runs-on: ubuntu-latest
+    environment: ${{ inputs.environment || 'production' }}
 
     steps:
       - name: "Checkout Completo (Tags e Historico)"

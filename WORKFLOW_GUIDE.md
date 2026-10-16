@@ -1,159 +1,238 @@
-# Guia Padronizado de Workflows Git, SemVer, Releases, Stable e Rollbacks
+# Manual Completo: Arquitetura de Workflows Git, Versionamento Semântico, Releases, Stable, Rollback e Integração Real
 
-Este repositorio contem uma estrutura modular e padronizada de engenharia de releases e CI/CD utilizando **Git + GitHub Actions**, projetada para ser reutilizada em projetos futuros.
+Este documento explica em detalhes o funcionamento do fluxo de trabalho padronizado deste repositório, como operar entre as branches no dia a dia e como integrar esta estrutura em projetos reais de produção.
 
 ---
 
-## 1. Arquitetura de Branches, Tags e Canais
+## 1. O Papel de Cada Branch e Tag (Quem mexe no quê?)
 
-O modelo combina a integracao continua na branch principal (`main`) com o isolamento de producao atraves do canal **`stable`** e suporte a correcoes urgentes via **`hotfix/*`**:
+Para não haver confusão sobre onde programar e o que cada referência significa, o repositório é dividido em **3 camadas**:
+
+| Referência (Branch / Tag) | Quem altera? | Finalidade prática |
+| :--- | :--- | :--- |
+| **`feature/*` ou `fix/*`** | **Desenvolvedor** | Bancada de trabalho diária. Toda nova funcionalidade ou correção começa em uma branch criada a partir da `main`. |
+| **`main`** | **Desenvolvedor (via Pull Request)** | Linha principal de integração. **Toda vez que código novo entra na `main`, o robô gera uma nova versão.** |
+| **`stable` (Branch e Tag)** | **Apenas o GitHub Actions** | Espelho fiel do ambiente de **Produção**. Você nunca faz commit manual nela; os workflows a atualizam automaticamente após cada deploy ou rollback. |
+| **Tags `vX.Y.Z` (ex: `v1.1.1`)** | **Apenas o GitHub Actions** | Pontos de salvamento permanentes no histórico (checkpoints). Permitem voltar a qualquer versão exata no futuro. |
+| **Tags `vX` e `vX.Y` (`v1`, `v1.1`)** | **Apenas o GitHub Actions** | Ponteiros móveis que sempre apontam para a última versão estável daquela família Major/Minor. |
+
+### A dúvida clássica: `main`, `Latest` e `stable` são a mesma coisa?
+- **Na rotina normal (99% do tempo): SIM.** Assim que você faz Merge de um Pull Request na `main`, o workflow `02. Release` cria a versão nova (ex: `v1.1.1`), marca essa versão como **`Latest`** nas Releases do GitHub e promove o código para a branch **`stable`**. Nesse momento, `main`, `Latest` e `stable` apontam exatamente para o mesmo código.
+- **Quando elas ficam diferentes?** Apenas em 3 situações específicas:
+  1. **Commits administrativos na `main` (`docs:`, `chore:`):** Eles entram na `main`, mas como não alteram o funcionamento do sistema, não geram versão nova. A `main` fica 1 commit à frente, enquanto `stable` e `Latest` continuam na última versão lançada.
+  2. **Pré-lançamentos (`rc`, `beta`, `alpha`):** Se você lançar uma `v1.2.0-rc.1` para testes, ela fica registrada nas tags, mas a Produção (`stable`) e o selo `Latest` continuam apontando para a última versão estável (`v1.1.1`).
+  3. **Rollback apenas de ponteiro (`only-stable-pointer`):** Quando você decide reverter apenas o servidor de Produção (`stable`) para a `v1.0.0` enquanto investiga o problema no código da `main` (`v1.1.0`).
+
+---
+
+## 2. O Fluxo do Dia a Dia Passo a Passo
+
+Veja o caminho completo que uma alteração percorre desde o seu computador até a Produção:
 
 ```mermaid
-flowchart TD
-    subgraph Dev["Desenvolvimento e Validacao (01. CI)"]
-        F["feature/* ou fix/*"] -->|Pull Request + CI| M["main (Linha de Integracao)"]
-    end
+sequenceDiagram
+    autonumber
+    actor Dev as Desenvolvedor
+    participant Feat as Branch feature/*
+    participant CI as Workflow 01. CI
+    participant Main as Branch main
+    participant Rel as Workflow 02. Release
+    participant Stable as Workflow 03. Stable (Produção)
 
-    subgraph Rel["Motor de Versionamento (02. Release)"]
-        M -->|Push ou Manual Dispatch| S["Calculo SemVer + CHANGELOG.md"]
-        S -->|Tag Imutavel| T["v1.2.0 (+ v1, v1.2)"]
-        S -->|Pre-lancamento opcional| PR["v1.3.0-rc.1 (Pre-release)"]
-    end
-
-    subgraph Prod["Canal de Producao (03. Stable e Deploy)"]
-        T -->|Promocao Automatica ou Manual| ST["Branch 'stable' e Tag 'stable'"]
-        ST -->|Deploy Rastreavel| P["Ambiente de Producao"]
-    end
-
-    subgraph Rec["Contingencia (04. Rollback e 05. Hotfix)"]
-        P -.->|Anomalia Detectada| RB["04. Rollback (Fast-Redeploy ou Forward-Revert)"]
-        RB -.->|Restaura versao anterior| ST
-        ST -.->|Cria branch urgente| HF["hotfix/v1.2.0-correcao"]
-        HF -->|Publica Patch v1.2.1| ST
-        HF -.->|PR Automatico de Backport| M
-    end
+    Dev->>Feat: Cria branch e faz commits (feat: / fix:)
+    Dev->>CI: git push origin feature/minha-tarefa
+    CI-->>Dev: Roda testes, build e valida mensagens de commit
+    Dev->>Main: Abre Pull Request no GitHub e clica em "Merge"
+    Main->>Rel: O Merge dispara o Workflow 02. Release
+    Rel->>Main: Calcula nova versão (ex: v1.1.0), atualiza package.json e CHANGELOG.md
+    Rel->>Rel: Cria a Tag v1.1.0 e publica a GitHub Release
+    Rel->>Stable: Aciona 03. Stable -> Faz deploy e aponta 'stable' para v1.1.0
 ```
 
-### Papel de cada Referencia:
-| Referencia | Tipo | Finalidade |
-| :--- | :--- | :--- |
-| `feature/*`, `fix/*` | Branch temporaria | Desenvolvimento de funcionalidades ou correcoes; validada pelo workflow **01. CI**. |
-| `develop` *(opcional)* | Branch de integracao | Ambiente intermediario opcional antes da abertura de Pull Request para `main`. |
-| `main` | Branch principal | Codigo consolidado pronto para compor a proxima release. |
-| **`stable`** | **Branch e Tag movel** | **Referencia exata do codigo em Producao.** Atualizada exclusivamente pelos workflows de Deploy, Rollback e Hotfix. |
-| `hotfix/*` | Branch de contingencia | Criada a partir de `stable` para corrigir falhas criticas em producao sem incluir alteracoes em andamento na `main`. |
-| `vX.Y.Z` (ex: `v1.2.0`) | Tag SemVer imutavel | Registro permanente de cada versao lancada e publicada no **GitHub Releases**. |
-| `vX`, `vX.Y` (ex: `v1`, `v1.2`) | Tags flutuantes | Apontam para a versao estavel mais recente dentro da respectiva serie Major/Minor. |
-
----
-
-## 2. Estrutura Modular de Scripts (`scripts/`)
-
-Os comandos de automacao foram separados por responsabilidade na pasta [`scripts/`](file:///d:/GitHub/test-github-actions/scripts), utilizando apenas modulos nativos do Node.js (sem necessidade de instalar pacotes externos):
-
-### Modulos Base (`scripts/lib/`):
-- [`scripts/lib/git.js`](file:///d:/GitHub/test-github-actions/scripts/lib/git.js): Execucao de comandos Git, leitura de URL do repositorio e parsing de argumentos de linha de comando.
-- [`scripts/lib/semver.js`](file:///d:/GitHub/test-github-actions/scripts/lib/semver.js): Parser e comparador SemVer 2.0.0, listagem ordenada de tags (`stable` e `prerelease`) e calculo de incremento (`major`, `minor`, `patch`, `alpha`, `beta`, `rc`).
-- [`scripts/lib/commits.js`](file:///d:/GitHub/test-github-actions/scripts/lib/commits.js): Analise e classificacao de commits segundo o padrao Conventional Commits.
-- [`scripts/lib/changelog.js`](file:///d:/GitHub/test-github-actions/scripts/lib/changelog.js): Formatacao de notas de lancamento e atualizacao de [`CHANGELOG.md`](file:///d:/GitHub/test-github-actions/CHANGELOG.md), [`package.json`](file:///d:/GitHub/test-github-actions/package.json) e arquivo `VERSION`.
-
-### Comandos Executaveis (`scripts/`):
-- [`scripts/status.js`](file:///d:/GitHub/test-github-actions/scripts/status.js): Diagnostico do estado atual das versoes, tags e previa do proximo Changelog (`--preview`).
-- [`scripts/validate-commits.js`](file:///d:/GitHub/test-github-actions/scripts/validate-commits.js): Validacao de mensagens de commit (utilizado no CI e localmente).
-- [`scripts/prepare-release.js`](file:///d:/GitHub/test-github-actions/scripts/prepare-release.js): Calculo de nova versao, atualizacao de arquivos e geracao de metadados para o GitHub Actions.
-- [`scripts/resolve-rollback.js`](file:///d:/GitHub/test-github-actions/scripts/resolve-rollback.js): Identificacao e validacao da versao de destino em operacoes de rollback.
-- [`scripts/commit-guide.js`](file:///d:/GitHub/test-github-actions/scripts/commit-guide.js): Referencia rapida no terminal sobre regras de Conventional Commits.
-
----
-
-## 3. Versionamento Semantico (SemVer) e Conventional Commits
-
-O formato de versao segue **`MAJOR.MINOR.PATCH`** (ex: `v2.4.1`) ou **`MAJOR.MINOR.PATCH-canal.N`** para pre-lancamentos (ex: `v2.5.0-rc.1`).
-
-| Prefixo do Commit | Exemplo | Incremento SemVer | Aplicacao |
-| :--- | :--- | :--- | :--- |
-| **`feat!:`** ou rodape `BREAKING CHANGE:` | `feat(api)!: remove suporte a rota v1` | **MAJOR** (`1.2.3` -> `2.0.0`) | Mudancas incompativeis com a API/contrato anterior. |
-| **`feat:`** | `feat(auth): adiciona autenticacao OAuth2` | **MINOR** (`1.2.3` -> `1.3.0`) | Nova funcionalidade retrocompativel. |
-| **`fix:`**, **`perf:`**, **`revert:`** | `fix(cart): corrige calculo de impostos` | **PATCH** (`1.2.3` -> `1.2.4`) | Correcao de bug, otimizacao de performance ou reversao. |
-| `docs:`, `chore:`, `refactor:`, `test:`, `ci:`, `style:`, `build:` | `docs: atualiza documentacao tecnica` | **NENHUM** *(nao dispara release isolada em modo `auto`)* | Manutencao interna, testes, formatacao ou documentacao. |
-
----
-
-## 4. Catalogo dos Workflows (`.github/workflows/`)
-
-### 4.1. [`01. CI` — `.github/workflows/ci.yml`](file:///d:/GitHub/test-github-actions/.github/workflows/ci.yml)
-- **Gatilhos:** Pull Requests para `main`, `stable`, `develop`, `release/**`, `hotfix/**` e pushes em branches de desenvolvimento.
-- **Execucao:**
-  1. Valida o padrao Conventional Commits atraves de [`scripts/validate-commits.js`](file:///d:/GitHub/test-github-actions/scripts/validate-commits.js).
-  2. Executa `npm ci`, `npm run lint`, `npm run test` e `npm run build`.
-  3. Aplica controle de concorrencia (`concurrency`) para interromper execucoes obsoletas na mesma branch.
-
-### 4.2. [`02. Release` — `.github/workflows/release.yml`](file:///d:/GitHub/test-github-actions/.github/workflows/release.yml)
-- **Gatilhos:**
-  - **Automatico:** Push na branch `main`.
-  - **Manual (`workflow_dispatch`):** Permite selecionar o incremento (`auto`, `patch`, `minor`, `major`, `prerelease-rc`, `prerelease-beta`, `prerelease-alpha`), definir uma versao especifica (`custom_version`) ou rodar em modo de simulacao (`dry_run`).
-- **Execucao:**
-  1. Executa a suite de testes e build antes de gerar a versao.
-  2. Calcula a versao via [`scripts/prepare-release.js`](file:///d:/GitHub/test-github-actions/scripts/prepare-release.js), atualiza o `package.json` e registra as alteracoes no [`CHANGELOG.md`](file:///d:/GitHub/test-github-actions/CHANGELOG.md).
-  3. Cria a tag imutavel (`vX.Y.Z`) e atualiza as tags de serie (`vX` e `vX.Y`).
-  4. Publica a **GitHub Release** e aciona o workflow **03. Stable e Deploy** para versoes estaveis.
-
-### 4.3. [`03. Stable e Deploy` — `.github/workflows/stable-deploy.yml`](file:///d:/GitHub/test-github-actions/.github/workflows/stable-deploy.yml)
-- **Gatilhos:** Acionado automaticamente apos Release, Rollback ou Hotfix (`workflow_call`) ou manualmente (`workflow_dispatch`).
-- **Execucao:**
-  1. Realiza checkout exato da tag solicitada (`vX.Y.Z` ou `latest`).
-  2. Valida testes e build da versao selecionada.
-  3. Executa o deploy no ambiente (`production` ou `staging`).
-  4. Atualiza a **branch `stable`** e a **tag `stable`** para apontarem para o commit implantado em producao.
-
-### 4.4. [`04. Rollback` — `.github/workflows/rollback.yml`](file:///d:/GitHub/test-github-actions/.github/workflows/rollback.yml)
-- **Gatilho:** Manual (`workflow_dispatch`) para reversao de emergencia.
-- **Parametros:**
-  - `target_version`: Informe `previous` para selecionar automaticamente a tag estavel imediatamente anterior, ou especifique a versao desejada (ex: `v1.0.0`).
-  - `strategy`:
-    - **`fast-redeploy`:** Reaponta a branch e a tag `stable` para a versao anterior e refaz o deploy imediatamente, sem modificar o historico de commits da branch `main`.
-    - **`forward-revert-release`:** Restaura o estado do codigo da versao alvo na branch `main` e publica uma nova versao `PATCH` (ex: `v1.2.1` com falha -> gera `v1.2.2` contendo o codigo estavel da `v1.2.0`).
-  - `deprecate_broken_release`: Marca a release problematica como Pre-release (`[ROLLED BACK]`) e adiciona um aviso no topo das notas de lancamento com data, responsavel e motivo.
-
-### 4.5. [`05. Hotfix` — `.github/workflows/hotfix.yml`](file:///d:/GitHub/test-github-actions/.github/workflows/hotfix.yml)
-- **Gatilho:** Manual (`workflow_dispatch`).
-- **Operacao:**
-  1. **`create-hotfix-branch`:** Cria uma branch `hotfix/vX.Y.Z-identificador` diretamente a partir da tag `stable`.
-  2. **`publish-hotfix`:** Apos o commit da correcao na branch de hotfix, gera uma nova versao `PATCH`, publica a Release, atualiza o canal `stable` e abre um **Pull Request de Backport** para a branch `main`.
-
----
-
-## 5. Comandos Locais (NPM Scripts)
-
-Os seguintes atalhos estao disponiveis no [`package.json`](file:///d:/GitHub/test-github-actions/package.json):
-
+### Passo 1: Iniciar uma tarefa nova
+Sempre parta da `main` sincronizada e crie uma branch para a sua alteração:
 ```bash
-# Diagnostico da versao atual, tags e proximo incremento previsto
-npm run version:status
-
-# Previa do Changelog que sera gerado na proxima versao
-npm run version:preview
-
-# Validacao dos ultimos commits locais no padrao Conventional Commits
-npm run commit:check
-
-# Guia de referencia de Conventional Commits no terminal
-npm run commit:guide
-
-# Preparacao local de versoes (atualiza package.json e CHANGELOG.md)
-npm run release:patch
-npm run release:minor
-npm run release:major
-npm run release:rc
-npm run release:beta
+git checkout main
+npm run git:sync
+git checkout -b feature/nova-funcionalidade
 ```
+*(Nota: `npm run git:sync` executa `git fetch origin --tags --force && git pull origin main`, garantindo que tanto o código quanto as tags móveis do robô sejam atualizados sem conflito).*
+
+### Passo 2: Programar e fazer Commits Semânticos
+O prefixo da mensagem do `git commit` informa ao workflow `02. Release` como calcular a próxima versão quando o código chegar na `main`:
+
+| Prefixo | Significado | Impacto na Versão (SemVer) | Exemplo |
+| :--- | :--- | :--- | :--- |
+| **`fix:`** / **`perf:`** / **`revert:`** | Correção de bug, melhoria de performance ou reversão | **PATCH** (`1.0.0` -> **`1.0.1`**) | `git commit -m "fix(login): corrige validacao de senha"` |
+| **`feat:`** | Nova funcionalidade compatível com o que já existe | **MINOR** (`1.0.1` -> **`1.1.0`**) | `git commit -m "feat(relatorio): adiciona exportacao CSV"` |
+| **`feat!:`** *(com `!`)* | Mudança incompatível (quebra integrações antigas) | **MAJOR** (`1.1.0` -> **`2.0.0`**) | `git commit -m "feat(api)!: altera formato do token"` |
+| **`chore:`** / **`docs:`** / **`refactor:`** / **`test:`** / **`ci:`** | Manutenção interna, documentação, refatoração ou testes | **NENHUM** *(não gera release sozinha)* | `git commit -m "docs: atualiza guia de instalacao"` |
+
+#### Dica prática: `git commit -m` vs `git commit -am`
+- **`git commit -m "mensagem"`:** Salva no commit apenas os arquivos que você adicionou antes com `git add`. Obrigatório quando você **criou arquivos novos**.
+- **`git commit -am "mensagem"`:** Faz `git add` automático e `commit` juntos para arquivos que **já existiam** no projeto e foram apenas editados.
+
+### Passo 3: Enviar a branch (`git push`) e validação do `01. CI`
+```bash
+git push origin feature/nova-funcionalidade
+```
+- O código ainda **não** foi para a `main` e ainda **não** gerou versão.
+- O workflow **[`01. CI`](file:///d:/GitHub/test-github-actions/.github/workflows/ci.yml)** roda automaticamente na sua branch para garantir que os testes (`npm run test`), o build (`npm run build`) e o formato dos commits estão corretos.
+
+### Passo 4: Abrir o Pull Request e fazer o Merge na `main`
+1. No GitHub, clique em **Compare & pull request** para abrir o PR da sua branch para a `main`.
+2. O modelo [`.github/PULL_REQUEST_TEMPLATE.md`](file:///d:/GitHub/test-github-actions/.github/PULL_REQUEST_TEMPLATE.md) será exibido. Para marcar as caixas `[ ]`, basta colocar um `x` dentro (`[x]`) ou clicar diretamente nas caixinhas após criar o PR.
+3. Com o check do **01. CI** aprovado, clique em **Merge pull request**.
+
+### Passo 5: O que acontece sozinho após o Merge (`02. Release` + `03. Stable`)
+Assim que o código entra na `main`:
+1. O workflow **[`02. Release`](file:///d:/GitHub/test-github-actions/.github/workflows/release.yml)** calcula a nova versão, atualiza o [`package.json`](file:///d:/GitHub/test-github-actions/package.json) e o [`CHANGELOG.md`](file:///d:/GitHub/test-github-actions/CHANGELOG.md), faz um commit automático `chore(release): vX.Y.Z [skip ci]`, cria a tag e publica a **GitHub Release**.
+2. Dentro da mesma execução do `02. Release`, ele chama como segunda etapa conectada o workflow **[`03. Stable e Deploy`](file:///d:/GitHub/test-github-actions/.github/workflows/stable-deploy.yml)**, que realiza o deploy em produção e atualiza a branch `stable` e a tag `stable`.
+
+> **Por que o `03. Stable e Deploy` aparece dentro do `02. Release`?**
+> Porque ele utiliza o recurso de *Reusable Workflows* (`workflow_call`) do GitHub Actions. Ao clicar na execução do `02. Release` (ou do `04. Rollback` / `05. Hotfix`), você verá o gráfico com as duas caixas conectadas por uma seta: a primeira preparando a versão e a segunda promovendo para `stable`.
 
 ---
 
-## 6. Reutilizacao em Projetos Futuros
+## 3. Operações de Emergência e Casos Especiais
 
-1. Copie para o novo repositorio os diretorios [`.github/`](file:///d:/GitHub/test-github-actions/.github), [`scripts/`](file:///d:/GitHub/test-github-actions/scripts) e o arquivo [`CHANGELOG.md`](file:///d:/GitHub/test-github-actions/CHANGELOG.md).
-2. No GitHub, acesse **Settings -> Actions -> General -> Workflow permissions** e habilite:
-   - **Read and write permissions**
-   - **Allow GitHub Actions to create and approve pull requests**
-3. Para projetos que nao utilizam Node.js (ex: Python, Go, C#, Rust, Docker), basta manter um arquivo `VERSION` na raiz do repositorio (ex: `1.0.0`) e ajustar os comandos de teste, build e deploy nos arquivos `.github/workflows/*.yml`.
+### 3.1. Rollback (`04. Rollback`) — Quando uma versão sobe com problema
+Se a versão recém-lançada (ex: `v1.1.0`) apresentar falha em produção, vá na aba **Actions > `04. Rollback` > Run workflow**:
+
+- **`target_version`:** Deixe `previous` (volta automaticamente para a versão estável imediatamente anterior) ou digite a tag desejada (ex: `v1.0.0`).
+- **`strategy` (Escolha como deseja reverter):**
+  1. **`revert-main-and-stable` (Padrão recomendado):** Volta tanto a Produção (`stable`) quanto os arquivos e o `package.json` da branch `main` para a versão anterior (`v1.0.0`).
+  2. **`only-stable-pointer`:** Volta imediatamente o servidor de Produção (`stable`) para a `v1.0.0`, mas mantém a branch `main` na `v1.1.0` para você corrigir o erro com calma.
+  3. **`forward-revert-release`:** Pega o código antigo da `v1.0.0`, restaura na `main` e lança como uma versão nova acima da atual (`v1.1.1`). Ideal quando você publica pacotes no NPM, Docker Hub ou lojas de apps que não aceitam voltar para números menores.
+- **`delete_broken_tag`:**
+  - Se `false` (padrão): Mantém a Release problemática no histórico com um alerta `[ROLLED BACK]` no título e na descrição para auditoria.
+  - Se `true`: Exclui completamente a tag e a Release problemática do GitHub, permitindo que a numeração seja reutilizada no futuro.
+
+### 3.2. Hotfix (`05. Hotfix`) — Correção urgente sem misturar com a `main`
+Quando a branch `main` já possui commits de funcionalidades futuras que ainda não podem ir ao ar, mas você precisa consertar um bug urgente na versão que está em Produção (`stable`):
+
+1. Vá em **Actions > `05. Hotfix` > Run workflow** e escolha **`create-hotfix-branch`** (informando um nome curto como `corrige-pagamento`).
+2. O robô criará uma branch `hotfix/v1.0.0-corrige-pagamento` partindo exatamente da tag `stable` atual.
+3. No seu computador, baixe a branch, aplique a correção e envie:
+   ```bash
+   git fetch origin
+   git checkout hotfix/v1.0.0-corrige-pagamento
+   git commit -am "fix: corrige calculo de pagamento"
+   git push origin hotfix/v1.0.0-corrige-pagamento
+   ```
+4. Volte em **Actions > `05. Hotfix` > Run workflow**, escolha **`publish-hotfix`** e informe o nome da branch `hotfix/v1.0.0-corrige-pagamento`.
+5. O robô lançará a versão `v1.0.1` direto em Produção (`stable`) e abrirá automaticamente um Pull Request levando essa mesma correção de volta para a `main` (*backport*).
+
+### 3.3. Pré-lançamento (`rc`, `beta`, `alpha`)
+Para gerar uma versão de testes sem alterar o canal `stable`:
+1. Vá em **Actions > `02. Release` > Run workflow**.
+2. Em `release_type`, selecione `prerelease-rc` (ou `prerelease-beta`).
+3. Será criada uma versão como `v1.2.0-rc.1` marcada como *Pre-release*, mantendo a Produção (`stable`) na versão estável anterior.
+
+---
+
+## 4. Como Integrar Este Fluxo em um Projeto Real
+
+Para transformar este template na infraestrutura oficial de um projeto real, siga os 4 passos abaixo:
+
+### Passo 1: Copiar a estrutura para o projeto real
+Copie os seguintes arquivos e pastas para a raiz do seu projeto:
+- Pasta [`.github/`](file:///d:/GitHub/test-github-actions/.github) (contendo os 5 arquivos em `workflows/` e o `PULL_REQUEST_TEMPLATE.md`)
+- Pasta [`scripts/`](file:///d:/GitHub/test-github-actions/scripts) (contendo `lib/` e os 5 scripts de comando)
+- Arquivo [`CHANGELOG.md`](file:///d:/GitHub/test-github-actions/CHANGELOG.md)
+- Adicione no `package.json` do projeto real os scripts utilitários:
+  ```json
+  "scripts": {
+    "version:status": "node scripts/status.js",
+    "version:preview": "node scripts/status.js --preview",
+    "commit:check": "node scripts/validate-commits.js",
+    "commit:guide": "node scripts/commit-guide.js",
+    "release:patch": "node scripts/prepare-release.js --type patch",
+    "release:minor": "node scripts/prepare-release.js --type minor",
+    "release:major": "node scripts/prepare-release.js --type major",
+    "release:rc": "node scripts/prepare-release.js --type prerelease-rc",
+    "git:sync": "git fetch origin --tags --force && git pull origin main"
+  }
+  ```
+
+---
+
+### Passo 2: Configurar Permissões, Proteção de Branches e Environments no GitHub
+
+Em um projeto real de equipe ou produção, configure estes 3 itens no painel do GitHub (**Settings** do repositório):
+
+#### A. Permissões do GitHub Actions (`Settings > Actions > General`)
+- Em **Workflow permissions**, selecione **Read and write permissions** e marque **Allow GitHub Actions to create and approve pull requests**.
+
+#### B. Regras de Proteção de Branch (`Settings > Branches > Add branch ruleset`)
+Para evitar que alguém quebre a `main` sem passar pelos testes:
+1. Crie uma regra para a branch **`main`**.
+2. Marque **Require a pull request before merging** (obriga o uso de Pull Request).
+3. Marque **Require status checks to pass** e adicione os checks `Validar Commits Semanticos` e `Testes e Build (Node 20)`.
+4. Marque **Block force pushes** (impede apagar o histórico da `main`).
+5. *(Importante)* Adicione o `github-actions[bot]` (ou deixe a regra permitir push do workflow) caso use branch protection restrita, para que o `02. Release` possa commitar o `CHANGELOG.md` e o `package.json`.
+
+#### C. Ambientes e Aprovação Manual (`Settings > Environments`)
+O arquivo [`.github/workflows/stable-deploy.yml`](file:///d:/GitHub/test-github-actions/.github/workflows/stable-deploy.yml) já está configurado com `environment: ${{ inputs.environment || 'production' }}`.
+Isso cria automaticamente no GitHub os ambientes **`production`** e **`staging`**:
+- Dentro de **Settings > Environments > production**, você pode cadastrar os **Environment Secrets** (chaves de banco de dados, senhas de nuvem, chaves SSH) exclusivos de produção.
+- Opcionalmente, você pode ativar **Required reviewers**: assim, quando uma release for gerada, o GitHub pausa antes do deploy em produção e envia uma notificação pedindo o seu "De acordo" com 1 clique.
+
+---
+
+### Passo 3: Conectar o Comando Real de Deploy no `03. Stable e Deploy`
+
+Hoje, o passo `Executar Deploy no Ambiente` no arquivo [`.github/workflows/stable-deploy.yml`](file:///d:/GitHub/test-github-actions/.github/workflows/stable-deploy.yml#L121-L133) roda `npm run deploy` (que apenas exibe um `echo`).
+Em um projeto real, você substitui esse passo (ou o script `"deploy"` do `package.json`) pelo comando real da sua infraestrutura. Veja os exemplos mais comuns:
+
+#### Exemplo 1: Deploy em Servidor Linux / VPS (via SSH + PM2 ou Docker)
+No GitHub (`Settings > Environments > production`), cadastre os secrets `VPS_HOST`, `VPS_USER` e `VPS_SSH_KEY`.
+No [`.github/workflows/stable-deploy.yml`](file:///d:/GitHub/test-github-actions/.github/workflows/stable-deploy.yml), substitua o passo de deploy por:
+```yaml
+      - name: "Executar Deploy via SSH na VPS"
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /var/www/meu-projeto
+            git fetch origin --tags --force
+            git checkout ${{ steps.resolve.outputs.resolved_tag }}
+            npm ci --omit=dev
+            npm run build
+            pm2 reload meu-app
+```
+*(Repare na vantagem: como o servidor faz `git checkout` da tag resolvida pelo workflow, tanto o deploy normal quanto o Rollback vão colocar no servidor exatamente a versão correta).*
+
+#### Exemplo 2: Deploy via Docker (Build e Push de Imagem com a Tag SemVer)
+```yaml
+      - name: "Build e Push da Imagem Docker"
+        run: |
+          docker login -u ${{ secrets.DOCKER_USER }} -p ${{ secrets.DOCKER_PASS }}
+          docker build -t minha-empresa/meu-app:${{ steps.resolve.outputs.resolved_tag }} .
+          docker tag minha-empresa/meu-app:${{ steps.resolve.outputs.resolved_tag }} minha-empresa/meu-app:stable
+          docker push minha-empresa/meu-app:${{ steps.resolve.outputs.resolved_tag }}
+          docker push minha-empresa/meu-app:stable
+```
+
+#### Exemplo 3: Deploy em Plataformas Cloud (Render, Railway, Vercel, Netlify, AWS)
+- **Via Deploy Hook (Render / Railway / Cloudflare):**
+  ```yaml
+      - name: "Acionar Webhook de Deploy"
+        run: curl -f -X POST "${{ secrets.DEPLOY_WEBHOOK_URL }}"
+  ```
+- **Via Vercel CLI (garantindo que a Vercel suba exatamente a versão do canal `stable`):**
+  ```yaml
+      - name: "Deploy na Vercel"
+        run: npx vercel deploy --prod --token=${{ secrets.VERCEL_TOKEN }}
+  ```
+
+---
+
+### Passo 4: Usando em Projetos que Não São Node.js (Python, Go, C#, PHP, Rust)
+
+Os scripts da pasta [`scripts/`](file:///d:/GitHub/test-github-actions/scripts) foram escritos usando apenas o Node.js padrão que **já vem pré-instalado** em todas as máquinas `ubuntu-latest` do GitHub Actions.
+Portanto, se o seu projeto futuro for em **Python, Go, C# ou Rust**:
+1. Crie um arquivo chamado `VERSION` na raiz do projeto contendo `1.0.0` (os scripts atualizarão esse arquivo automaticamente no lugar do `package.json`).
+2. Nos arquivos `.github/workflows/*.yml`, basta trocar `npm ci`, `npm run test` e `npm run build` pelos comandos da linguagem do projeto (ex: `pytest`, `go test ./...`, `dotnet test`, `cargo build`).

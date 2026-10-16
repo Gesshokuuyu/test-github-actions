@@ -15,7 +15,8 @@
     "release:minor": "node scripts/prepare-release.js --type minor",
     "release:major": "node scripts/prepare-release.js --type major",
     "release:rc": "node scripts/prepare-release.js --type prerelease-rc",
-    "release:beta": "node scripts/prepare-release.js --type prerelease-beta"
+    "release:beta": "node scripts/prepare-release.js --type prerelease-beta",
+    "git:sync": "git fetch origin --tags --force && git pull origin main"
   },
   "repository": {
     "type": "git",
