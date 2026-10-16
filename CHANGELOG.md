@@ -5,6 +5,17 @@ Todas as mudancas notaveis neste projeto serao documentadas neste arquivo.
 O formato e baseado em [Keep a Changelog](https://keepachangelog.com/pt-BR/1.0.0/),
 e este projeto adere ao [Versionamento Semantico (SemVer 2.0.0)](https://semver.org/lang/pt-BR/).
 
+## [v1.0.0] - 2026-10-16
+
+### Manutencao e Outros
+- Add modular SemVer release workflows (`d6c6715`)
+- fix name github to .github (`b0b56be`)
+- fix yml (`f3961d4`)
+- modify 'index.js' (`c1f627a`)
+- add workflow (`8c309de`)
+- init (`336e4c3`)
+- Initial commit (`2826e37`)
+
 ## [1.0.0] - Versao Inicial
 
 ### Novas Funcionalidades (Features)
